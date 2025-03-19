@@ -1,0 +1,17 @@
+# Ignore actual data files and directories
+roboweedmaps/images/
+roboweedmaps/database/current/
+roboweedmaps/logs/
+roboweedmaps/state/
+
+# But keep the directory structure
+!roboweedmaps/images/.gitkeep
+!roboweedmaps/database/.gitkeep
+!roboweedmaps/logs/.gitkeep
+!roboweedmaps/state/.gitkeep
+
+# Ignore any files containing sensitive information
+*password*
+*credential*
+*.bak
+*.zip
