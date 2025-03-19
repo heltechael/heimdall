@@ -1,0 +1,811 @@
+Project Path: yolov5_cropweed
+
+Source Tree:
+
+```
+yolov5_cropweed
+├── requirements.txt
+├── train_annotator.bash
+├── src
+│   ├── make_yolov5_datasets.py
+│   ├── publish_model.py
+│   ├── train_yolov5_network.bash
+│   ├── main.bash
+│   └── make_yolov5_datasets.bash
+├── data
+│   ├── blacklist_plant_ids_annotation.csv
+│   └── dataset.yaml
+└── utils
+    ├── tensorboard_server.bash
+    ├── stop_process.bash
+    ├── resume_training.bash
+    ├── cd_results.bash
+    └── publish_model.bash
+
+```
+
+`/data/yolov5_cropweed/requirements.txt`:
+
+```txt
+asttokens==2.1.0
+backcall==0.2.0
+contourpy==1.0.6
+cycler==0.11.0
+DateTime==4.7
+decorator==5.1.1
+executing==1.2.0
+fonttools==4.38.0
+ipdb==0.13.9
+ipython==8.6.0
+jedi==0.18.1
+kiwisolver==1.4.4
+matplotlib==3.6.1
+matplotlib-inline==0.1.6
+numpy==1.23.4
+packaging==21.3
+parso==0.8.3
+pexpect==4.8.0
+pickleshare==0.7.5
+Pillow==9.3.0
+pkg_resources==0.0.0
+prompt-toolkit==3.0.31
+ptyprocess==0.7.0
+pure-eval==0.2.2
+Pygments==2.13.0
+pymssql==2.2.5
+pyparsing==3.0.9
+python-dateutil==2.8.2
+pytz==2022.6
+PyYAML==6.0
+six==1.16.0
+stack-data==0.6.0
+toml==0.10.2
+tqdm==4.64.1
+traitlets==5.5.0
+wcwidth==0.2.5
+zope.interface==5.5.1
+
+```
+
+`/data/yolov5_cropweed/train_annotator.bash`:
+
+```bash
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_PATH=$TRAINING_SESSIONS_PATH_ANNOTATOR # env variable
+TRAINING_SESSION_PATH=$TRAINING_PATH/$(date +%F_%H-%M-%S)
+echo "Start training session: $TRAINING_SESSION_PATH"
+# Make train session folder
+mkdir -p $TRAINING_SESSION_PATH
+# Copy software to session folder
+echo "Copy src folder..."
+cp -r "$DIR/src" "$TRAINING_SESSION_PATH"
+# Check copy of src
+MD5_SRC=$(find "$DIR/src" -type f -exec md5sum {} \; |  awk '{ print $1 }' | sort | md5sum)
+MD5_TRAINING_SESSION_PATH=$(find "$TRAINING_SESSION_PATH/src" -type f -exec md5sum {} \; | awk '{ print $1 }' | sort | md5sum)
+if [ "$MD5_SRC" != "$MD5_TRAINING_SESSION_PATH" ]; then
+	echo "Invalid MD5 sum for src folder: $MD5_TRAINING_SESSION_PATH should be $MD5_SRC!"
+	exit 1
+fi
+echo "Copy utils folder..."
+cp -r "$DIR/utils" "$TRAINING_SESSION_PATH"
+tbrain2@roboweed-brain-dev:~/IGIS_software_michael/IGIS_software_michael/SystemSoftware/Python/Annotator/models/YoloV5/Training$ cat train_annotator.bash 
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_PATH=$TRAINING_SESSIONS_PATH_ANNOTATOR # env variable
+TRAINING_SESSION_PATH=$TRAINING_PATH/$(date +%F_%H-%M-%S)
+echo "Start training session: $TRAINING_SESSION_PATH"
+# Make train session folder
+mkdir -p $TRAINING_SESSION_PATH
+# Copy software to session folder
+echo "Copy src folder..."
+cp -r "$DIR/src" "$TRAINING_SESSION_PATH"
+# Check copy of src
+MD5_SRC=$(find "$DIR/src" -type f -exec md5sum {} \; |  awk '{ print $1 }' | sort | md5sum)
+MD5_TRAINING_SESSION_PATH=$(find "$TRAINING_SESSION_PATH/src" -type f -exec md5sum {} \; | awk '{ print $1 }' | sort | md5sum)
+if [ "$MD5_SRC" != "$MD5_TRAINING_SESSION_PATH" ]; then
+	echo "Invalid MD5 sum for src folder: $MD5_TRAINING_SESSION_PATH should be $MD5_SRC!"
+	exit 1
+fi
+echo "Copy utils folder..."
+cp -r "$DIR/utils" "$TRAINING_SESSION_PATH"
+# Check copy of utils
+MD5_SRC=$(find "$DIR/utils" -type f -exec md5sum {} \; |  awk '{ print $1 }' | sort | md5sum)
+MD5_TRAINING_SESSION_PATH=$(find "$TRAINING_SESSION_PATH/utils" -type f -exec md5sum {} \; | awk '{ print $1 }' | sort | md5sum)
+if [ "$MD5_SRC" != "$MD5_TRAINING_SESSION_PATH" ]; then
+	echo "Invalid MD5 sum for utils folder: $MD5_TRAINING_SESSION_PATH should be $MD5_SRC!"
+	exit 1
+fi
+echo "Copy venv folder..."
+cp -rL "$DIR/venv" "$TRAINING_SESSION_PATH" # ToDo: pip freeze > requirements_tmp.txt && pip install -r requirements_tmp.txt
+# Start the trainning procedure
+echo "Start ..."
+nohup "$TRAINING_SESSION_PATH/src/main.bash" &
+echo $! > "$TRAINING_SESSION_PATH/pid"
+
+```
+
+`/data/yolov5_cropweed/src/make_yolov5_datasets.py`:
+
+```py
+#!/usr/bin/env python
+import os
+import shutil
+import time
+from typing import Any, Dict, List, Literal, Optional
+import numpy as np
+from tqdm import tqdm
+from AgroDB import RoboWeedMaPSDB
+from ImageCache import AnnotationImageCache
+from Misc.path import suffix, mkdir_p, copy_smart, symlink_smart
+from Misc.geometry import center_enclosed
+from Conf.ml_data_info import make_blacklist_plant_ids_annotation_csv
+EPPO_CODES = [
+     'PPPMM'  # Dicot
+    ,'PPPDD'  # Monocot
+    ,'VICFX'  # Faba bean
+    ,'PIBSA'  # Field Pea
+    ,'ZEAMX'  # Maize
+    ,'SOLTU'  # Potato
+    ,'SPQOL'  # Spinach
+    ,'BEAVA'  # Sugar beet
+    ,'CIRAR'  # Creeping Thistle
+    ,'BRSOL'  # White cabbage
+    ,'FAGES'  # Buckwheat
+    ,'1LUPG'  # Lupinus
+    ,'PSEZ'   # Plant Stem Emergence Zone (Not a real EPPO code)
+]  # Eppo code for the plants that we use as labels
+IMAGE_IDS_HELD_BACK = [
+    # OpenDR
+    831621, 971110, 971112, 984201, 1028464, 1028465, 1028466, 1030259, 1030260, 1030261, 1030262,
+    1030263, 1030275, 1038335, 1038338, 1038340, 1038348, 1046441, 1059091, 1074250, 1266069, 1473,
+    1517, 19837, 45622, 78778, 78875, 79120, 79380, 80002, 199258, 200798, 201079, 209084, 210169,
+    211563, 221553, 200955, 201061, 201180, 201662, 205943, 200519, 19980, 211360, 219383, 223811,
+    237549, 238292, 238343, 238383, 238454, 238505, 263806, 264662, 276765, 269462, 269691, 454059,
+    457756, 616407, 698894, 700239, 705775, 719534, 719787, 724635, 728245, 728516, 728623, 730457,
+    731186, 719223, 720530, 723601, 724594, 724964, 727433, 727578, 728021, 728160, 728682, 729222,
+    729406, 729424, 729799, 729949, 731542, 731753, 731797, 732787, 750833, 1039580, 1039975, 1046361,
+    1048482, 1051783, 1325024, 1327434, 1351743, 1424694, 1424985, 1438760, 1441727, 1449518, 727983,
+    677352, 666085, 704127, 680718, 701640, 1131874, 1131927, 1131968, 1131908, 1131949, 1131951,
+    1131970, 1131884, 1448140, 1448159, 1448191, 1449134, 1448215, 1448241, 1448277, 1448310, 1448355,
+    1448380, 1448426, 1448442, 1448815
+]
+# Force images from this upload into the training bucket
+FIXED_UPLOAD_IDS_TRAIN = [773,775,776,777,778,779]  # 2020-10-09 Oekotek - we also fix grown for train
+FIXED_UPLOAD_IDS_VAL = []
+FIXED_UPLOAD_IDS_TEST = []
+FIXED_IMAGE_IDS_TRAIN = []  
+FIXED_IMAGE_IDS_VAL = []
+FIXED_IMAGE_IDS_TEST = [  # Images also found in Test/Debug upload 355 
+    3, 4, 849, 462, 3411, 3412, 3414, 3417, 3420, 3567, 3569, 3574, 3576, 3579, 4137, 4140, 
+    9758, 20542, 20544, 20546, 20547, 20549, 22013, 22551, 22552, 23562, 23617, 67060, 67062, 
+    67066, 67374, 76818, 77634, 78653, 78654, 78655, 95304, 95496, 238939, 238941, 238942, 376823, 
+    376824, 376825, 828075, 850670]  # ToDo: Automate fetch this and make new test upload just for this purpose
+""""
+/****** Get image ids for original images in test upload 355******/
+SELECT [Id] AS [ImageId], UploadId
+FROM [data].[Images]
+WHERE [FileName] in (SELECT [FileName] FROM [data].[Images] WHERE UploadId = 355) AND UploadId != 355
+ORDER BY UploadId, Id
+"""  
+# Const
+DATABASE_NAME = 'RoboWeedMaps'  # Must be production, we can only train on production code!
+WORK_DIR_NAME = 'data'  # Folder for the train, val and test files
+DATA_CONFIG_YAML_FILENAME = 'dataset.yaml' # data-configurations yaml file (used by YoloV5 train.py)
+# Paths
+src_dir = os.path.abspath(os.path.join(__file__, os.pardir))
+training_session_dir = os.path.abspath(os.path.join(src_dir, os.pardir))
+work_dir = os.path.realpath(os.path.join(training_session_dir, WORK_DIR_NAME))
+images_dir = os.path.join(work_dir, 'images')
+train_images_dir = os.path.join(images_dir, 'train')
+val_images_dir = os.path.join(images_dir, 'val')
+test_images_dir = os.path.join(images_dir, 'test')
+labels_dir = os.path.join(work_dir, 'labels')
+train_labels_dir = os.path.join(labels_dir, 'train')
+val_labels_dir = os.path.join(labels_dir, 'val')
+test_labels_dir = os.path.join(labels_dir, 'test')
+bucket_image_paths = [
+    train_images_dir
+    ,val_images_dir
+    ,test_images_dir
+]
+BUCKET_PROB = np.array([0.80, 0.20, 0.0])
+def reset_work_dir():
+    print("Reset work dir: %s .." % work_dir)
+    # Remove old work dir
+    old_work_dir = suffix(work_dir)
+    if os.path.exists(old_work_dir):
+        shutil.move(old_work_dir, '/tmp/')
+    # Remake the work dir
+    mkdir_p(work_dir)
+    # Make the training images dirs
+    mkdir_p(train_images_dir)
+    mkdir_p(val_images_dir)
+    mkdir_p(test_images_dir)
+    # Make the training labels dirs
+    mkdir_p(train_labels_dir)
+    mkdir_p(val_labels_dir)
+    mkdir_p(test_labels_dir)
+def make_data_config_file() -> str:
+    yaml_path = os.path.join(work_dir, DATA_CONFIG_YAML_FILENAME)
+    with open(yaml_path, 'w') as fp:
+        # Write labels
+        fp.write("names:" + os.linesep)
+        fp.writelines(["- %s%s" % (eppo, os.linesep) for eppo in EPPO_CODES])
+        # Write number of classes
+        fp.write("nc: %d%s" % (len(EPPO_CODES), os.linesep))
+        # Write folder paths
+        fp.writelines([
+            "train: %s%s" % (train_images_dir, os.linesep)
+            ,"val: %s%s" % (val_images_dir, os.linesep)
+            ,"test: %s%s" % (test_images_dir, os.linesep)
+        ]) 
+    return yaml_path
+def fetch_db_data():
+    print("Fetch annotation data from db..")
+    # SQL driver for RoboWeedMaPS database
+    rwm_db = RoboWeedMaPSDB(db=DATABASE_NAME)
+    # Fetch the basis data
+    print("Fetch the basis data..")
+    data = rwm_db.get_labled_data_annotation()
+    # Filter out the held back images
+    print("Filter out the held back images..")
+    before_len = len(data)
+    data = [row for row in tqdm(data) if row['ImageId'] not in IMAGE_IDS_HELD_BACK ]
+    print(f"{before_len} -> {len(data)}")
+    # Filter PSEZ
+    print("Filter PSEZ..")
+    skip_count = 0
+    data_filtered = []
+    for row_i in tqdm(data):
+        if row_i['EPPOCode'] == 'PSEZ':
+            psez_image_id = row_i['ImageId']
+            match_found = False
+            for row_j in data:
+                # For PSEZ check if they are inside an other bounding box of type Maize (ZEAMX), Sugar Beet (BEAVA) or White Cabbage (BRSOL) 
+                if row_j['ImageId'] == psez_image_id:
+                    if row_j['EPPOCode'] in ('ZEAMX', 'BEAVA', 'BRSOL'):  # Selected crops to find PSEZ for
+                        if center_enclosed(
+                            inner_box=np.array([row_i['MinX'], row_i['MinY'], row_i['MaxX'], row_i['MaxY']]), # PSEZ box
+                            outer_box=np.array([row_j['MinX'], row_j['MinY'], row_j['MaxX'], row_j['MaxY']])  # Plant box ie. ZEAMX, BEAVA or BRSOL 
+                        ): 
+                            print("%s (%s) --> %s (%s)" %(row_i['Id'], row_i['EPPOCode'], row_j['Id'], row_j['EPPOCode']))
+                            data_filtered.append(row_i)
+                            match_found = True
+                            break
+            if not match_found:
+                # This PSEZ inn't enclosed by any crop bbox
+                skip_count += 1
+                print("Skip PSEZ: %s" % row_i['Id'])
+        else:
+            data_filtered.append(row_i)  # Add all other rows than PSEZ
+    print("Total number of annotations: %d" % len(data_filtered))
+    print("PSEZ skipped : %s" % skip_count)
+    return data_filtered
+def partion_on_image_id(db_data) -> Dict:
+    print("Partion annotation data on file names")
+    result = {}
+    for d in tqdm(db_data):
+        image_id = d['ImageId']
+        if image_id not in result:
+            result[image_id] = []
+        result[image_id].append(d)
+    print("Total number of images: %d" % len(result.keys()))
+    return result
+def get_bucket_path(data_rows) -> str:
+    data_row = data_rows[0] 
+    upload_id: int = data_row['UploadId']
+    grown_weed = data_row['GrownWeed']
+    # Option to fix uploads to bucket
+    if upload_id in FIXED_UPLOAD_IDS_TRAIN:
+        return train_images_dir
+    elif upload_id in FIXED_UPLOAD_IDS_VAL:
+        return val_images_dir
+    elif upload_id in FIXED_UPLOAD_IDS_TEST:
+        return test_images_dir
+    
+    # Option to fix images to bucket
+    if upload_id in FIXED_IMAGE_IDS_TRAIN:
+        return train_images_dir
+    elif upload_id in FIXED_IMAGE_IDS_VAL:
+        return val_images_dir
+    elif upload_id in FIXED_IMAGE_IDS_TEST:
+        return test_images_dir
+    
+    # Fix grown images e.g. plant boxes from Flakkebjerg, to train 
+    # These images are not target, but we can learn visual plant features 
+    if grown_weed:
+        return train_images_dir
+    # Distrubte at random
+    return np.random.choice(bucket_image_paths, p=BUCKET_PROB / BUCKET_PROB.sum())
+    
+def make_image_file(
+            annotation_cache: AnnotationImageCache,
+            data_rows: List[Dict[str, Any]]
+        ) -> str:
+    data_row = data_rows[0]
+    image_id = data_row['ImageId']
+    upload_id=data_row['UploadId']
+    filename=data_row['FileName']
+    # Fetch image to local storage
+    image_local_path = annotation_cache.get_path(upload_id, filename)
+    # Find if image is train, val or test
+    bucket_path: str = get_bucket_path(data_rows)
+    # make sym link to image
+    _, ext = os.path.splitext(filename)
+    image_link_path: str = os.path.join(bucket_path, str(image_id)+ext)
+    os.symlink(image_local_path, image_link_path)
+    return image_link_path
+# Find the eppo codes from anotation to root, that are labels
+def find_relevant_eppo(eppo_code: str, cotyledon_id: int) -> Optional[str]:
+    # handle SOLTU[DIGIT] and SPQOL[DIGIT]
+    for EPPO_CODE in EPPO_CODES:
+        if eppo_code.startswith(EPPO_CODE):
+            eppo_code = EPPO_CODE
+    # find the eppo code to use
+    if eppo_code in EPPO_CODES:
+        return eppo_code
+    elif cotyledon_id == -100:
+        return 'PPPMM'
+    elif cotyledon_id == -101:
+        return 'PPPDD'
+    else:    
+        return None
+def row_to_coco(row: Dict[str, Any]) -> Optional[str]:
+    eppo_code = row['EPPOCode']
+    cotyledon_id = row['cotyledon']
+    min_x = row['MinX']
+    min_y = row['MinY']
+    max_x = row['MaxX']
+    max_y = row['MaxY']
+    image_width = row['Width']
+    image_height = row['Height']
+    # YOLO labeling format
+    # <class-ID> <X center> <Y center> <Box width> <Box height>
+    # Values are nomalized from zero to one
+    if eppo_code is None:
+        return None
+    eppo_code = find_relevant_eppo(eppo_code, cotyledon_id)
+    if eppo_code is None:
+        return None
+    
+    class_index = EPPO_CODES.index(eppo_code)
+    box_width =  max_x - min_x
+    box_height =  max_y - min_y
+    center_x = float(box_width)/2 + min_x
+    center_y = float(box_height)/2 + min_y
+    center_x_norm = center_x / float(image_width)
+    center_y_norm = center_y / float(image_height)
+    box_width_norm = box_width / float(image_width)
+    box_height_norm = box_height / float(image_height)
+    return '%s %s %s %s %s' % (
+        class_index 
+        ,center_x_norm
+        ,center_y_norm
+        ,box_width_norm
+        ,box_height_norm)
+def label_file_content(data_rows: List[Dict[str, Any]]) -> List[str]:
+    result = []
+    for row in data_rows:
+        coco = row_to_coco(row)
+        if coco is not None:
+            result.append(coco)
+    return result
+def make_label_file(
+            image_path: str,
+            data_rows: List[Dict[str, Any]]
+        ) -> str:
+    # Find labels file path
+    images_dir, image_filename = os.path.split(image_path)
+    image_name, _ = os.path.splitext(image_filename)
+   
+    labels_dir = 'labels'.join(images_dir.rsplit('images', 1))
+    label_file_path = os.path.join(labels_dir, image_name + '.txt')
+    # Write labels content to file
+    with open(label_file_path, 'w') as fp:
+        fp.writelines([line + os.linesep for line in label_file_content(data_rows) if line])
+    return label_file_path
+def make_dataset(image_data: Dict[str, List[Dict[str, Any]]]):
+    # Local image Handler
+    annotation_cache = AnnotationImageCache()
+    progress_bar : tqdm = tqdm(image_data.items())
+    for image_id, data_rows in progress_bar:
+        progress_bar.set_description("ImageId: %d" % image_id)
+        bucket_path:str = get_bucket_path(data_rows)
+        # Make Image file and link to this
+        image_link_path = make_image_file(annotation_cache, data_rows)
+        # Make label file
+        make_label_file(image_link_path, data_rows)
+    
+def make_yolov5_datasets():
+    print("Make working directory..")
+    reset_work_dir()
+    print("Make info files..")
+    make_blacklist_plant_ids_annotation_csv(work_dir)
+    
+    print("Make the config files..")
+    data_config_path = make_data_config_file()
+    print("Fetch data from database..")
+    start_time = time.time()
+    db_data: List[Dict[str, Any]] = fetch_db_data()
+    data_pr_image: Dict[str, List[Dict[str, Any]]] = partion_on_image_id(db_data)
+    print("Done fetching data in %d seconds" % (time.time() - start_time))
+    print("Make image files and labels")
+    start_time = time.time()
+    make_dataset(data_pr_image)
+    print("Done processing data in %d seconds" % (time.time() - start_time))
+    
+if __name__ == "__main__":
+    
+    make_yolov5_datasets()  # Make custom_data.yaml 
+    print("YoloV5 datasets done")
+
+```
+
+`/data/yolov5_cropweed/src/publish_model.py`:
+
+```py
+#!/usr/bin/env python3
+import argparse
+import glob
+import json
+import os
+import sys
+from typing import Any, Dict, List, Literal, Optional
+from datetime import datetime
+import yaml
+# Misc
+from AgroDB import RoboWeedMaPSDB
+from Misc.path import mkdir_p, copy_smart
+DIR = os.path.abspath(os.path.join(__file__, os.pardir))
+TRAINING_SESSION_DIR = os.path.abspath(os.path.join(DIR, os.pardir))
+DATA_DIR = os.path.abspath(os.path.join(TRAINING_SESSION_DIR, 'data'))
+RELEASED_MODEL_DIR = '/mnt/models/Annotation'
+TEST_DATABASE_NAME = 'RoboWeedMapsTest'
+PROD_DATABASE_NAME = 'RoboWeedMaps'
+DATA_CONFIG_YAML_FILENAME = 'dataset.yaml' # data-configurations yaml file (used by YoloV5 train.py)
+MODEL_TYPE = 'Annotation'
+DATA_CONFIG_YAML_PATH = os.path.join(DATA_DIR, DATA_CONFIG_YAML_FILENAME)
+def parse_args(args):
+    parser = argparse.ArgumentParser(description='Script for publish a crop-weed detection (the "annotation") model to the RWM system')
+    parser.add_argument('-v', '---version', metavar='v', type=int, help='The crop-weed detection model release version number e.g 42', required=True)
+    parser.add_argument('-t', '--publish-to-test', help='Publish the model to TEST', dest='publish_to_test', action='store_true', default=False)
+    parser.add_argument('-p', '--publish-to-prod', help='Publish the model to PRODUCTION', dest='publish_to_prod', action='store_true', default=False)
+    return parser.parse_args(args)
+def get_training_session_datetime() -> datetime:
+    name = os.path.basename(TRAINING_SESSION_DIR)
+    return datetime.strptime(name,'%Y-%m-%d_%H-%M-%S')
+def get_training_session_name() -> str:
+    session_datetime = get_training_session_datetime()
+    session_string = session_datetime.strftime('%Y-%m-%d_%H-%M-%S')
+    try:
+        if not session_string == os.path.basename(TRAINING_SESSION_DIR):
+            raise ValueError
+    except ValueError:
+        raise 'You must publish a model from a training session folder'
+    return session_string
+def load_eppo_codes() -> List[str]:
+    with open(DATA_CONFIG_YAML_PATH, 'r') as fp:
+        data_config = yaml.safe_load(fp)
+        return data_config['names']
+def make_model_json(
+        model_dir: str,
+        version: Optional[int]) -> str:
+    info = {
+        "Project": "RWM", 
+        "EppoCode": load_eppo_codes(), 
+        "ModelVersion": ("V%d" % version) if version else None, 
+        "Date": str(get_training_session_datetime().strftime('%d%b_%y')), 
+        "License": "NA"
+    }
+    json_path =  os.path.join(model_dir, 'Model_json.json')
+    print("make %s" % json_path)
+    if not os.path.exists(json_path):
+        with open(json_path, "w") as fp:
+            json.dump(info, fp)
+            fp.write(os.linesep)
+    return json_path
+def copy_weights(session_name: str, model_dir:str) -> str:
+    # Find project folder (YoloV5 make a new folder for project when a train.py is started)
+    project_name=session_name  # We use session name as project name
+    train_dir = os.path.join(os.environ["SOFTWAREPATH"],"YoloV5RWM","runs","train")
+    project_dir = os.path.join(train_dir, 'igis_'+project_name)
+    # Yolov5 train.py will make a new folder for each time a project is trainned
+    # We'll take the latest (normaly use there should only be one) 
+    project_folder_runs = glob.glob(project_dir+'*')
+    latest_project_folder = sorted(project_folder_runs)[0]  # e.g. /home/tbrain2/Software/YoloV5RWM/runs/train/igis_2022-11-03_13-38-41
+    best_weightfile = os.path.join(latest_project_folder, 'weights', 'best.pt')  # e.g. /home/tbrain2/Software/YoloV5RWM/runs/train/igis_2022-11-03_13-38-41/weights/best.pt
+    print("copy %s to %s" % (best_weightfile, model_dir))
+    copy_smart(best_weightfile, model_dir, overwrite=False, dry_run=False)
+    return best_weightfile
+def make_model_files(
+        session_name: str,
+        version: Optional[int]) -> str:
+    # Make folder for the model files
+    print(session_name)
+    model_file_suffix = 'YOLOv5' + '_V%s' % version if version is not None else ''
+    model_dir_name = session_name + '_'+ model_file_suffix
+    model_dir = os.path.join(RELEASED_MODEL_DIR, model_dir_name)
+    print(model_dir)
+    mkdir_p(model_dir)
+    # Make Model_json.json
+    make_model_json(model_dir, version)
+    # Copy weights 
+    copy_weights(session_name, model_dir)
+    return model_dir
+ 
+def update_database(
+        database_name: str, 
+        file_path: str,
+        version: Optional[int]):
+    rwm_db = RoboWeedMaPSDB(db=database_name)
+    rwm_db.insert_ml_model(
+        model_type=MODEL_TYPE, 
+        description='RWM YOLOv5' + ' V%s' % version if version is not None else '',  
+        file_name=os.path.basename(file_path))
+def main(args=None):
+    # Parse arguments      
+    args = parse_args(args)
+    version = args.version
+    publish_to_test = args.publish_to_test
+    publish_to_prod = args.publish_to_prod
+    # Find name for this trainnig session
+    session_name = get_training_session_name()
+    # Make folder with files for the model on NAS
+    model_dir = make_model_files(session_name, version)
+    # Publish database(s)
+    if publish_to_test:
+        update_database(TEST_DATABASE_NAME, model_dir, version)
+    
+    if publish_to_prod:
+        update_database(PROD_DATABASE_NAME, model_dir, version)  
+if __name__ == "__main__":
+    main(args = sys.argv[1:])
+
+```
+
+`/data/yolov5_cropweed/src/train_yolov5_network.bash`:
+
+```bash
+#!/usr/bin/env bash
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+# Config
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"  # use order from nvidia-smi
+# --device 0 : The GTX GeForce 1080 TI
+# --device 1 : The RTX A5000 card
+# Set up env (conda)
+source /home/tbrain2/anaconda3/etc/profile.d/conda.sh
+conda activate YoloV5_Python3.8_Cuda11.7 # Swift to the conda enviroment with cuda and pytorch setup
+echo "Use conda env: $CONDA_DEFAULT_ENV"  # Check activated conda env
+# Print python path
+which python
+# Set nices level
+renice -n 19 $$
+# Start Training
+project_name="igis_$(basename "$TRAINING_SESSION_DIR")"
+python "$SOFTWAREPATH/YoloV5RWM/train.py" \
+    --data "$TRAINING_SESSION_DIR/data/dataset.yaml" \
+    --weights pre_t/yolov5l.pt \
+    --batch-size 7 \
+    --img-size 1600 \
+    --name "$project_name" \
+    --device 1 >> "$TRAINING_SESSION_DIR/out.txt"
+
+```
+
+`/data/yolov5_cropweed/src/main.bash`:
+
+```bash
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_PATH=$(realpath "$DIR"/..)
+OUT_TRAIN_FILE=$TRAINING_SESSION_PATH/out.txt
+echo "Training session: $TRAINING_SESSION_PATH" >> "$OUT_TRAIN_FILE"
+touch "$OUT_TRAIN_FILE"
+# Prepare data set
+echo "Make CSV datasets" >> "$OUT_TRAIN_FILE"
+if ! "$TRAINING_SESSION_PATH/src/make_yolov5_datasets.bash" >> "$OUT_TRAIN_FILE" 2>&1;
+then
+    exit 1;
+fi
+# Make sym link
+project_name="igis_$(basename "$TRAINING_SESSION_PATH")"
+latest_folder=$(ls -1 "$SOFTWAREPATH/YoloV5RWM/runs/train" | grep  "$project_name"  | sort -h | tail -n 1)
+result_dir_all="$SOFTWAREPATH/YoloV5RWM/runs/train"  # show all
+result_dir="$result_dir_all/$latest_folder"  # show only current
+ln -s "$result_dir" "$TRAINING_SESSION_PATH"/results
+# Start the training procedure
+echo "Start trainig" >> "$OUT_TRAIN_FILE"
+if ! "$TRAINING_SESSION_PATH/src/train_yolov5_network.bash" >> "$OUT_TRAIN_FILE" 2>&1;
+then
+    exit 2;
+fi
+
+```
+
+`/data/yolov5_cropweed/src/make_yolov5_datasets.bash`:
+
+```bash
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+#/home/tbrain2/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/venv/bin/python "$DIR"/make_yolov5_datasets.py
+"$TRAINING_SESSION_DIR/venv/bin/python" "$DIR/make_yolov5_datasets.py"
+
+```
+
+`/data/yolov5_cropweed/data/blacklist_plant_ids_annotation.csv`:
+
+```csv
+-12,-7,0,148,150,151,994
+
+```
+
+`/data/yolov5_cropweed/data/dataset.yaml`:
+
+```yaml
+names:
+- PPPMM
+- PPPDD
+- VICFX
+- PIBSA
+- ZEAMX
+- SOLTU
+- SPQOL
+- BEAVA
+- CIRAR
+- BRSOL
+- FAGES
+- 1LUPG
+- PSEZ
+nc: 13
+train: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/train
+val: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/val
+test: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/test
+
+```
+
+`/data/yolov5_cropweed/utils/tensorboard_server.bash`:
+
+```bash
+#!/usr/bin/env bash
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+# Set up env (conda)
+source /home/tbrain2/anaconda3/etc/profile.d/conda.sh
+conda activate YoloV5_Python3.8_Cuda11.7 # Swift to the conda enviroment with cuda and pytorch setup
+echo "Use conda env: $CONDA_DEFAULT_ENV"  # Check activated conda env
+project_name="igis_$(basename "$TRAINING_SESSION_DIR")"
+if [ -z "$(ls -A "$SOFTWAREPATH/YoloV5RWM/runs/train")" ]; then
+   echo "No runs folder was found!"
+   echo "Note: If you have started a new training session, it has probably just not been created yet."
+   exit
+fi
+latest_folder=$(ls -1 "$SOFTWAREPATH/YoloV5RWM/runs/train" | grep  "$project_name"  | sort -h | tail -n 1)
+log_dir_all="$SOFTWAREPATH/YoloV5RWM/runs/train"  # show all
+log_dir="$log_dir_all/$latest_folder"  # show only current
+echo "$log_dir"
+tensorboard --host "$(ip route get 1 | head -n1  | awk '{print $7}')" --logdir "$log_dir_all"
+
+```
+
+`/data/yolov5_cropweed/utils/stop_process.bash`:
+
+```bash
+#!/usr/bin/env bash
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+source "$SOFTWAREPATH/SystemSoftware/Bash/src/confirm.bash"
+if [[ ! -f "$TRAINING_SESSION_DIR/pid" ]]; then
+    echo "pid was not found!"
+    exit 1
+fi
+pid=$(cat "$TRAINING_SESSION_DIR/pid")
+if [ ! -d "/proc/${pid}" ]; then
+    echo "The process $pid is not running...";
+    exit 2
+fi
+confirm_yes "Would you really like to stop the trainning session (yes|no)?" && kill $(ps -o pid= -s $(ps -o sess --no-heading --pid "$pid"))
+
+```
+
+`/data/yolov5_cropweed/utils/resume_training.bash`:
+
+```bash
+#!/usr/bin/env bash
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+# Config
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"  # use order from nvidia-smi
+# --device 0 : The GTX GeForce 1080 TI
+# --device 1 : The RTX A5000 card
+# Check if the process is alrady running 
+if [[ -f "$TRAINING_SESSION_DIR/pid" ]]; then
+    pid=$(cat "$TRAINING_SESSION_DIR/pid")
+tbrain2@roboweed-brain-dev:~/IGIS_software_michael/IGIS_software_michael/SystemSoftware/Python/Annotator/models/YoloV5/Training/utils$ cat publish_model.bash 
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+SRC_DIR=$(realpath "$TRAINING_SESSION_DIR/src")
+"$TRAINING_SESSION_DIR/venv/bin/python" "$SRC_DIR/publish_model.py" "$@"
+tbrain2@roboweed-brain-dev:~/IGIS_software_michael/IGIS_software_michael/SystemSoftware/Python/Annotator/models/YoloV5/Training/utils$ ls
+cd_results.bash     resume_training.bash  tensorboard_server.bash
+publish_model.bash  stop_process.bash
+tbrain2@roboweed-brain-dev:~/IGIS_software_michael/IGIS_software_michael/SystemSoftware/Python/Annotator/models/YoloV5/Training/utils$ cat resume_training.bash 
+#!/usr/bin/env bash
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+# Config
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"  # use order from nvidia-smi
+# --device 0 : The GTX GeForce 1080 TI
+# --device 1 : The RTX A5000 card
+# Check if the process is alrady running 
+if [[ -f "$TRAINING_SESSION_DIR/pid" ]]; then
+    pid=$(cat "$TRAINING_SESSION_DIR/pid")
+    if [ -d "/proc/${pid}" ]; then
+        echo "The process is aldready running ...";  # ToDo check if PID has been reused for anothe process
+        exit 1
+    fi
+fi
+# Check if there are any saved ephoc to continue from 
+latest_folder=$(ls -1 "$SOFTWAREPATH/YoloV5RWM/runs/train/" | grep  "$project_name"  | sort -h | tail -n 1)
+weights_path="$SOFTWAREPATH/YoloV5RWM/runs/train/$latest_folder/weights/last.pt"
+if [ ! -f "$weights_path" ]; then
+    echo "No saved epoch to continue from"
+    exit 2
+fi
+# Change dir to avoid - relative path in YoloV5 to still match
+cd "$SOFTWAREPATH/"SystemSoftware/Python/Annotator/models/YoloV5/Training || exit 3
+# Set up env (conda)
+source /home/tbrain2/anaconda3/etc/profile.d/conda.sh
+conda activate YoloV5_Python3.8_Cuda11.7 # Swift to the conda enviroment with cuda and pytorch setup
+echo "Use conda env: $CONDA_DEFAULT_ENV"  # Check activated conda env
+# Print python path
+which python
+# Set nices level
+renice -n 19 $$
+# Start Training
+project_name="igis_$(basename "$TRAINING_SESSION_DIR")"
+nohup python "$SOFTWAREPATH/YoloV5RWM/train.py" --resume "$weights_path" --device 1 >> "$TRAINING_SESSION_DIR/out.txt" 2>&1 &
+echo $! > "$TRAINING_SESSION_DIR/pid"
+
+```
+
+`/data/yolov5_cropweed/utils/cd_results.bash`:
+
+```bash
+#!/usr/bin/env bash
+# Change directory to the folder with weights
+source "$SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash" # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+project_name="igis_$(basename "$TRAINING_SESSION_DIR")"
+latest_folder=$(ls -1 "$SOFTWAREPATH/YoloV5RWM/runs/train" | grep  "$project_name"  | sort -h | tail -n 1)
+result_dir_all="$SOFTWAREPATH/YoloV5RWM/runs/train"  # show all
+result_dir="$result_dir_all/$latest_folder"  # show only current
+echo cd "$result_dir" || exit
+
+```
+
+`/data/yolov5_cropweed/utils/publish_model.bash`:
+
+```bash
+#!/usr/bin/env bash
+source $SOFTWAREPATH/SystemSoftware/services/conf/setup_prod.bash # Use prod env when training
+DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TRAINING_SESSION_DIR=$(realpath "$DIR/..")
+SRC_DIR=$(realpath "$TRAINING_SESSION_DIR/src")
+"$TRAINING_SESSION_DIR/venv/bin/python" "$SRC_DIR/publish_model.py" "$@"
+
+```

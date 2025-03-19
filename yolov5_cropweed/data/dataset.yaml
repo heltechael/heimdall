@@ -1,0 +1,18 @@
+names:
+- PPPMM
+- PPPDD
+- VICFX
+- PIBSA
+- ZEAMX
+- SOLTU
+- SPQOL
+- BEAVA
+- CIRAR
+- BRSOL
+- FAGES
+- 1LUPG
+- PSEZ
+nc: 13
+train: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/train
+val: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/val
+test: /media/tbrain2/Storage/Software/SystemSoftware/Python/Annotator/models/YoloV5/Training/data/images/test
