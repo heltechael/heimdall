@@ -1,54 +1,55 @@
-import pymssql
-import os
-from typing import List, Dict, Any, Optional
+import pyodbc
+from typing import Dict, List, Any, Optional
 
-class RWMDatabaseConnector:
-    def __init__(self, db_name='RoboWeedMaps', host='localhost', user='SA', password='Robotbil123!'):
-        self.db_name = db_name
-        self.host = host
-        self.user = user
-        self.password = password
-        self.conn = None
+class RWMDatabase:
+    def __init__(self, db_name: str = "RoboWeedMaps", server: str = "localhost", user: str = "SA", password: str = "Robotbil123!"):
+        self.conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE={db_name};"
+            f"UID={user};"
+            f"PWD={password};"
+        )
         
     def connect(self):
-        self.conn = pymssql.connect(
-            server=self.host,
-            user=self.user,
-            password=self.password,
-            database=self.db_name
-        )
-        return self.conn
-    
-    def close(self):
-        if self.conn:
-            self.conn.close()
-            self.conn = None
-            
-    def get_training_annotations(self) -> List[Dict[str, Any]]:
-        if not self.conn:
-            self.connect()
-            
-        cursor = self.conn.cursor(as_dict=True)
+        return pyodbc.connect(self.conn_str)
         
+    def get_labeled_data_for_training(self) -> List[Dict[str, Any]]:
         query = """
         SELECT 
             a.Id,
-            a.EPPOCode,
             a.ImageId,
-            a.MinX, a.MinY, a.MaxX, a.MaxY,
-            i.Width, i.Height, i.FileName,
+            a.MinX,
+            a.MinY,
+            a.MaxX,
+            a.MaxY,
+            a.EPPOCode,
+            a.Cotyledon as cotyledon,
+            i.FileName,
+            i.Width,
+            i.Height,
             i.UploadId,
-            ISNULL(p.GrownPlant, 0) as GrownWeed,
-            ISNULL(a.cotyledon, 0) as cotyledon,
-            a.APPROVED
+            u.GrownWeed
         FROM data.Annotations a
-        INNER JOIN data.Images i ON a.ImageId = i.Id
-        LEFT JOIN data.Plants p ON a.PlantId = p.Id
-        WHERE i.USE_FOR_TRAINING = 1
+        JOIN data.Images i ON a.ImageId = i.Id
+        JOIN data.Uploads u ON i.UploadId = u.Id
+        WHERE i.UseForTraining = 1
         """
         
-        cursor.execute(query)
-        result = cursor.fetchall()
-        cursor.close()
-        
-        return result
+        try:
+            conn = self.connect()
+            cursor = conn.cursor()
+            cursor.execute(query)
+            
+            columns = [column[0] for column in cursor.description]
+            results = []
+            
+            for row in cursor.fetchall():
+                results.append(dict(zip(columns, row)))
+                
+            conn.close()
+            return results
+            
+        except Exception as e:
+            print(f"Database error: {e}")
+            return []

@@ -16,6 +16,42 @@ EPPO_CODES = [
     'PSEZ'
 ]
 
+"""
+EPPO_CODES_MARCO = [
+    'PPPMM',
+    'PPPDD',
+    'VICFX',
+    'PIBSA',
+    'ZEAMX',
+    'SOLTU',
+    'SPQOL',
+    'BEAVA',
+    'CIRAR',
+    'BRSOL',
+    'FAGES',
+    '1LUPG',
+    'CHEAL',
+    'FUMOF',
+    '1MATG',
+    'GERMO',
+    'EPHHE',
+    'EQUAR',
+    'GALAP',
+    '1CRUF',
+    'SINAR',
+    'POLAV',
+    'VERPE',
+    'VIOAR',
+    'POLCO',
+    'TAROF',
+    'POLLA',
+    'ATXPA',
+    'LAMPU',
+    'SENVU',
+    'PSEZ'
+]
+"""
+
 IMAGE_IDS_HELD_BACK = [
     831621, 971110, 971112, 984201, 1028464, 1028465, 1028466, 1030259, 1030260, 1030261, 1030262,
     1030263, 1030275, 1038335, 1038338, 1038340, 1038348, 1046441, 1059091, 1074250, 1266069, 1473,
@@ -44,6 +80,6 @@ FIXED_IMAGE_IDS_TEST = [
     376824, 376825, 828075, 850670
 ]
 
-BUCKET_PROB = [0.80, 0.10, 1.0]
+BUCKET_PROB = [0.80, 0.20, 0.00]
 
 RWM_IMAGES_PATH = '/data/roboweedmaps/images/'
