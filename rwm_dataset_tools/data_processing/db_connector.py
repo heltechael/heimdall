@@ -1,55 +1,43 @@
 import pyodbc
-from typing import Dict, List, Any, Optional
+from config.dataset_config import DATABASE_NAME
 
-class RWMDatabase:
-    def __init__(self, db_name: str = "RoboWeedMaps", server: str = "localhost", user: str = "SA", password: str = "Robotbil123!"):
-        self.conn_str = (
-            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-            f"SERVER={server};"
-            f"DATABASE={db_name};"
-            f"UID={user};"
-            f"PWD={password};"
+class RoboWeedMaPSDB:
+    def __init__(self, db: str = DATABASE_NAME):
+        self.db = db
+        self.conn = self._get_connection()
+
+    def _get_connection(self):
+        conn_str = (
+            "DRIVER={ODBC Driver 17 for SQL Server};"
+            "SERVER=localhost;"
+            f"DATABASE={self.db};"
+            "UID=SA;"
+            "PWD=Robotbil123!;"
         )
-        
-    def connect(self):
-        return pyodbc.connect(self.conn_str)
-        
-    def get_labeled_data_for_training(self) -> List[Dict[str, Any]]:
+        return pyodbc.connect(conn_str)
+
+    def get_labled_data_annotation(self):
         query = """
         SELECT 
             a.Id,
             a.ImageId,
+            a.UploadId,
+            i.FileName,
+            a.EPPOCode,
             a.MinX,
             a.MinY,
             a.MaxX,
             a.MaxY,
-            a.EPPOCode,
-            a.Cotyledon as cotyledon,
-            i.FileName,
             i.Width,
             i.Height,
-            i.UploadId,
-            u.GrownWeed
+            i.GrownWeed,
+            a.cotyledon
         FROM data.Annotations a
         JOIN data.Images i ON a.ImageId = i.Id
-        JOIN data.Uploads u ON i.UploadId = u.Id
-        WHERE i.UseForTraining = 1
+        WHERE a.[USE FOR TRAINING] = 1 AND a.APPROVED = 1
         """
-        
-        try:
-            conn = self.connect()
-            cursor = conn.cursor()
-            cursor.execute(query)
-            
-            columns = [column[0] for column in cursor.description]
-            results = []
-            
-            for row in cursor.fetchall():
-                results.append(dict(zip(columns, row)))
-                
-            conn.close()
-            return results
-            
-        except Exception as e:
-            print(f"Database error: {e}")
-            return []
+        cursor = self.conn.cursor()
+        cursor.execute(query)
+        columns = [col[0] for col in cursor.description]
+        data = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return data
